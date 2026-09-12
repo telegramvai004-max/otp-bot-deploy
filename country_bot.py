@@ -307,6 +307,18 @@ def handle_ai_message(chat_id, text):
 
 def main():
     print("Country-menu OTP sender bot running...")
+    # Pin the control panel to the OTP group so buttons live there.
+    try:
+        posted = tg_send(config.CHAT_ID,
+                         "🌍 <b>OTP Control Panel</b>\n"
+                         "Pick a platform, then a country to start sending OTPs.",
+                         platform_menu())
+        if posted and posted.get("ok"):
+            mid = posted["result"]["message_id"]
+            tg("pinChatMessage", chat_id=config.CHAT_ID, message_id=mid,
+               disable_notification=True)
+    except Exception as e:
+        print("panel post error:", e)
     offset = 0
     while True:
         try:
