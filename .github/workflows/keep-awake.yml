@@ -1,0 +1,13 @@
+name: keep-awake
+
+on:
+  schedule:
+    - cron: "*/4 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping bot
+        run: curl -s -o /dev/null -w "%{http_code}\n" https://otp-bot-1nk1.onrender.com/
