@@ -92,8 +92,12 @@ def tg_url(method):
 
 
 def tg_send(text, copy_otp=None):
+    return send_otp(config.CHAT_ID, text, copy_otp)
+
+
+def send_otp(chat_id, text, copy_otp=None):
     payload = {
-        "chat_id": config.CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
     }
