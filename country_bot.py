@@ -155,6 +155,20 @@ def handle_command(chat_id, text):
         else:
             tg_send(chat_id, "Not sending any OTPs right now.")
         return True
+    if text.startswith("/ping"):
+        tg_send(chat_id, "🟢 Bot is online and responding.")
+        return True
+    if text.startswith("/help"):
+        tg_send(chat_id,
+                "🛠 <b>Available commands</b>\n\n"
+                "/start — open the platform & country menu\n"
+                "/ping — check the bot is alive\n"
+                "/status — see what is currently being sent\n"
+                "/stop — stop all OTP sending\n"
+                "/help — this list\n\n"
+                "⚙️ <b>AI issues?</b> The bot automatically restarts and "
+                "sends an alert here if it crashes.")
+        return True
     return False
 
 
@@ -216,7 +230,13 @@ def main():
             break
         except Exception as e:
             print("loop error:", e)
-            time.sleep(2)
+            try:
+                tg_send(config.CHAT_ID,
+                        f"⚠️ <b>Bot loop error</b>\n<code>{e}</code>\n"
+                        f"Restarting in 5s…")
+            except Exception:
+                pass
+            time.sleep(5)
 
 
 if __name__ == "__main__":
