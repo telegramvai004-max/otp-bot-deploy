@@ -6,6 +6,7 @@ import requests
 
 import config
 import otp_bot
+import ai_bot
 
 API = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{{method}}"
 RATE = 2  # OTPs per second
@@ -48,6 +49,7 @@ def platform_menu():
     rows = []
     for p in PLATFORMS:
         rows.append([{"text": p["label"], "callback_data": f"pl:{p['key']}"}])
+    rows.append([{"text": "🐍 Python AI", "callback_data": "ai"}])
     rows.append([{"text": "🛑 Stop Sending", "callback_data": "stop"}])
     return {"inline_keyboard": rows}
 
@@ -74,6 +76,8 @@ def country_menu(plat_key, page=0):
 
 
 CURRENT = {"app": None, "flag": None, "cc": None, "name": None}
+AI_MODE = set()          # chat_ids currently chatting with the AI
+MODEL_CHOICE = {}        # chat_id -> preferred ai_bot provider key
 _thread = None
 _send_stop = threading.Event()
 
@@ -158,6 +162,33 @@ def handle_command(chat_id, text):
     if text.startswith("/ping"):
         tg_send(chat_id, "🟢 Bot is online and responding.")
         return True
+    if text.startswith("/ai") or text.startswith("/python"):
+        if not ai_bot.available():
+            tg_send(chat_id, "⚠️ No AI provider is configured yet.\n"
+                             "Add a GEMINI_API_KEY / OPENAI_API_KEY / GROQ_API_KEY "
+                             "or DEEPSEEK_API_KEY in Render → Environment.")
+            return True
+        AI_MODE.add(chat_id)
+        ai_bot.reset_history(chat_id)
+        tg_send(chat_id,
+                "🤖 <b>AI assistant ready.</b>\n"
+                "Ask me anything — or send a Python snippet like:\n<code>print(2**10)</code>\n\n"
+                "I'll run and answer it. Send /exit to leave AI mode.")
+        return True
+    if text.startswith("/exit"):
+        AI_MODE.discard(chat_id)
+        tg_send(chat_id, "👋 Left AI mode. Use /ai to return anytime.")
+        return True
+    if text.startswith("/model"):
+        rows = []
+        for key, cfg in ai_bot.available():
+            cur = " ✅" if MODEL_CHOICE.get(chat_id) == key else ""
+            rows.append([{"text": f"🧠 {cfg['label']}{cur}",
+                          "callback_data": f"model:{key}"}])
+        rows.append([{"text": "☘️ Auto (first working)", "callback_data": "model:auto"}])
+        tg_send(chat_id, "🧠 <b>Choose your AI model:</b>",
+                {"inline_keyboard": rows})
+        return True
     if text.startswith("/help"):
         tg_send(chat_id,
                 "🛠 <b>Available commands</b>\n\n"
@@ -203,6 +234,75 @@ def handle_callback(cb):
             if p == cc:
                 start_sender(plat_key, cc, flag, name, chat_id)
                 break
+    elif data == "ai":
+        if not ai_bot.available():
+            tg_edit(chat_id, msg_id,
+                    "⚠️ <b>No AI provider configured yet.</b>\n"
+                    "Set one of GEMINI_API_KEY / OPENAI_API_KEY / GROQ_API_KEY "
+                    "/ DEEPSEEK_API_KEY in Render → Environment variables.",
+                    platform_menu())
+            return
+        AI_MODE.add(chat_id)
+        ai_bot.reset_history(chat_id)
+        tg_edit(chat_id, msg_id,
+                "🤖 <b>Python AI assistant ready.</b>\n\n"
+                "Ask me to solve anything — math, code, ideas, debugging.\n"
+                "- Send normal text → I answer\n"
+                "- Send a code snippet → I run it and show the result\n"
+                "- /model → switch AI brain\n- /exit → back to the menu",
+                {"inline_keyboard": [[{"text": "⬅️ Back to menu",
+                                       "callback_data": "back"}]]})
+    elif data.startswith("model:"):
+        key = data.split(":", 1)[1]
+        if key == "auto":
+            MODEL_CHOICE.pop(chat_id, None)
+            tg_edit(chat_id, msg_id, "☘️ <b>AI set to Auto</b> — picks the first "
+                                     "working provider.")
+        else:
+            MODEL_CHOICE[chat_id] = key
+            tg_edit(chat_id, msg_id, f"🧠 <b>AI set to:</b> "
+                                     f"{ai_bot.MODELS[key]['label']}")
+
+
+def handle_ai_message(chat_id, text):
+    """Handle a message sent while the user is in AI mode."""
+    text = (text or "").strip()
+    if not text:
+        return
+    # If the user pasted a code block or asks to run code, execute it.
+    if text.startswith("```"):
+        code = text.strip("` \n")
+        if code.lower().startswith("python"):
+            code = code[len("python"):].lstrip("\n")
+        tg_send(chat_id, "🐍 Running your code…")
+        result = ai_bot.run_python(code)
+        out = f"<b>Result:</b>\n<pre>{result}</pre>"
+        tg_send(chat_id, out)
+        ai_bot.push_message(chat_id, "user",
+                            f"[user ran this python code:\n{code}\noutput:\n{result}]")
+        return
+    if text.lower().startswith("run "):
+        code = text[4:].strip()
+        tg_send(chat_id, "🐍 Running your code…")
+        result = ai_bot.run_python(code)
+        out = f"<b>Result:</b>\n<pre>{result}</pre>"
+        tg_send(chat_id, out)
+        ai_bot.push_message(chat_id, "user",
+                            f"[user ran this python code:\n{code}\noutput:\n{result}]")
+        return
+
+    # Normal chat: ask the AI, with a "typing" indicator.
+    tg("sendChatAction", chat_id=chat_id, action="typing")
+    if MODEL_CHOICE.get(chat_id):
+        avail = dict((k, v) for k, v in ai_bot.available())
+        key = MODEL_CHOICE[chat_id]
+        if key in avail:
+            reply = ai_bot.ask_with(chat_id, text, key)
+        else:
+            reply, key = ai_bot.ask(chat_id, text)
+    else:
+        reply, key = ai_bot.ask(chat_id, text)
+    tg_send(chat_id, reply)
 
 
 def main():
@@ -224,6 +324,8 @@ def main():
                     txt = u["message"]["text"]
                     if txt.startswith("/"):
                         handle_command(chat_id, txt)
+                    elif chat_id in AI_MODE:
+                        handle_ai_message(chat_id, txt)
         except KeyboardInterrupt:
             print("\nStopped.")
             stop_sender()
