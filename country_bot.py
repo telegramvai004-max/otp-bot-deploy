@@ -75,7 +75,7 @@ def country_menu(plat_key, page=0):
     return {"inline_keyboard": rows}
 
 
-CURRENT = {"app": None, "flag": None, "cc": None, "name": None, "deliver_to": None}
+CURRENT = {"app": None, "flag": None, "cc": None, "name": None}
 AI_MODE = set()          # chat_ids currently chatting with the AI
 MODEL_CHOICE = {}        # chat_id -> preferred ai_bot provider key
 _thread = None
@@ -88,28 +88,27 @@ def stop_sender():
     if _thread and _thread.is_alive():
         _thread.join(timeout=3)
     _thread = None
-    CURRENT.update(app=None, flag=None, cc=None, name=None, deliver_to=None)
+    CURRENT.update(app=None, flag=None, cc=None, name=None)
 
 
 def start_sender(plat_key, cc, flag, name, chat_id):
-    """Start sending test OTPs. Deliveries go to the bot's DM chat
-    (chat_id), NOT the group."""
+    """Start sending test OTPs into the OTP group (config.CHAT_ID)."""
     global _thread, _send_stop
     stop_sender()
     _send_stop = threading.Event()
     plat = PLAT_BY_KEY[plat_key]
+    otp_len = plat["digits"]
 
     def worker():
         while not _send_stop.is_set():
             local = "".join(str(random.randint(0, 9)) for _ in range(9))
             number = cc + local
-            otp_len = plat["digits"]
             otp = str(random.randint(10 ** (otp_len - 1), 10 ** otp_len - 1))
             msg = f"Your {plat['app']} code is {otp}"
             rec = {"num": number, "cli": plat["app"], "message": msg}
             text = otp_bot.format_record(rec)
-            ok = otp_bot.send_otp(chat_id, text, otp)  # DM chats only
-            print(f"[{'OK' if ok else 'FAIL'}] {name} {plat['app']} OTP={otp} num=+{number} -> chat {chat_id}")
+            ok = otp_bot.tg_send(text, otp)  # sends to the OTP group
+            print(f"[{'OK' if ok else 'FAIL'}] {name} {plat['app']} OTP={otp} num=+{number}")
             if not ok:
                 time.sleep(5)
             for _ in range(RATE):
@@ -117,13 +116,13 @@ def start_sender(plat_key, cc, flag, name, chat_id):
                     break
                 time.sleep(1.0 / RATE)
 
-    CURRENT.update(app=plat["key"], flag=flag, cc=cc, name=name, deliver_to=chat_id)
+    CURRENT.update(app=plat["key"], flag=flag, cc=cc, name=name)
     _thread = threading.Thread(target=worker, daemon=True)
     _thread.start()
     tg_send(chat_id,
             f"🚀 Started {plat['label']} test OTPs for <b>{flag} {name}</b> (+{cc}), "
             f"{otp_len} digits · {RATE} OTP/s.\n"
-            f"OTPs are arriving here in our private chat. Use /stop to halt.")
+            f"OTPs are being sent to the OTP group. Use /stop to halt.")
 
 
 def tg_send(chat_id, text, markup=None):
@@ -145,8 +144,8 @@ def handle_command(chat_id, text):
     text = (text or "").strip()
     if text.startswith("/start"):
         tg_send(chat_id, "🌍 <b>Select a platform:</b>\n"
-                         "Then choose a country — OTPs are delivered here in "
-                         "our private chat.",
+                         "Then choose a country — OTPs will be sent to the OTP group "
+                         "for numbers in that country.",
                 platform_menu())
         return True
     if text.startswith("/stop"):
@@ -209,8 +208,6 @@ def handle_callback(cb):
     chat_id = (cb.get("message") or {}).get("chat", {}).get("id")
     msg_id = (cb.get("message") or {}).get("message_id")
     data = cb.get("data", "")
-    # OTPs always land in the bot's private DM with the person who tapped.
-    dm_id = (cb.get("from") or {}).get("id") or chat_id
     tg("answerCallbackQuery", callback_query_id=cb["id"])
     if not chat_id or not msg_id:
         return
@@ -236,11 +233,9 @@ def handle_callback(cb):
         _, plat_key, cc = data.split(":")
         for p, flag, short, name in COUNTRIES:
             if p == cc:
-                # Panel is tapped in the group, but deliveries go to the DM.
-                start_sender(plat_key, cc, flag, name, dm_id)
+                start_sender(plat_key, cc, flag, name, chat_id)
                 tg_edit(chat_id, msg_id,
-                        f"🚀 Started: {flag} {name} … OTPs arriving in your "
-                        f"private chat with the bot.",
+                        f"🚀 Started: {flag} {name} … OTPs arriving in the OTP group.",
                         platform_menu())
                 break
     elif data == "ai":
