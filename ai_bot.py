@@ -21,7 +21,7 @@ MODELS = {
     "gemini": {
         "label": "🌀 Gemini",
         "env": "GEMINI_API_KEY",
-        "model": "gemini-1.5-flash",
+        "model": "gemini-3.6-flash",
     },
     "openai": {
         "label": "🔵 OpenAI",
