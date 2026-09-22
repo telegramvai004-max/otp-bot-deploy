@@ -24,6 +24,31 @@ PLATFORMS = [
 ]
 PLAT_BY_KEY = {p["key"]: p for p in PLATFORMS}
 
+# short forms accepted in search input, e.g. "IN WA" -> WhatsApp + India
+APP_ALIASES = {
+    "wa": "whatsapp", "whatsapp": "whatsapp", "whats": "whatsapp",
+    "fb": "facebook", "facebook": "facebook",
+    "tg": "telegram", "telegram": "telegram", "tel": "telegram",
+}
+
+
+def parse_search(text):
+    """Split a search message into (platform_key, country_query).
+
+    Order doesn't matter: 'IN WA', 'WA IN', 'facebook IN' all work.
+    """
+    app = None
+    parts = []
+    for token in (text or "").replace(",", " ").split():
+        norm = "".join(ch for ch in token if ch.isalnum()).lower()
+        if not norm:
+            continue
+        if norm in APP_ALIASES:
+            app = APP_ALIASES[norm]
+        else:
+            parts.append(token)
+    return app, " ".join(parts).strip()
+
 
 def tg(method, **kw):
     try:
@@ -104,7 +129,8 @@ def country_menu(plat_key, page=0):
 
 CURRENT = {"app": None, "flag": None, "short": None, "cc": None, "name": None}
 AI_MODE = set()          # chat_ids currently chatting with the AI
-SEARCH_MODE = set()      # chat_ids waiting for a country search input
+SEARCH_MODE = set()      # chat_ids waiting for a search input
+PENDING_APP = {}         # chat_id -> platform chosen via search, waiting for country
 MODEL_CHOICE = {}        # chat_id -> preferred ai_bot provider key
 _thread = None
 _send_stop = threading.Event()
@@ -141,10 +167,35 @@ def do_stop(chat_id, msg_id=None):
         tg_send(chat_id, text, platform_menu())
 
 
+def search_prompt():
+    side = PLAT_BY_KEY.get(CURRENT.get("app") or "whatsapp")["label"]
+    return ("🔍 <b>Search OTP</b>\n"
+            "Type the <b>app</b> and <b>country</b> short forms in one "
+            "message:\n"
+            "<code>IN WA</code> → India · WhatsApp\n"
+            "<code>PK FB</code> → Pakistan · Facebook\n"
+            "<code>US TG</code> → USA · Telegram\n\n"
+            "· Apps: <b>WA</b> WhatsApp · <b>FB</b> Facebook · "
+            "<b>TG</b> Telegram\n"
+            "· Countries: 2-letter code like <code>IN</code>, "
+            "<code>US</code>, <code>PK</code>\n"
+            f"· No app given → uses: {side}\n"
+            "/cancel_search exits search.")
+
+
 def handle_search_text(chat_id, text):
-    q = text.strip().lower()
+    app, q = parse_search(text)
+    q = q.lower()
     if not q:
+        if app:
+            PENDING_APP[chat_id] = app
+            tg_send(chat_id,
+                    f"✅ Platform: <b>{PLAT_BY_KEY[app]['label']}</b>.\n"
+                    "Now type the country code, e.g. <code>IN</code> — or "
+                    "just send the full <code>IN WA</code> again.",
+                    platform_menu())
         return
+    # resolve the country
     hits = [c for c in COUNTRIES if c[2].lower() == q]
     if not hits:
         cand = [c for c in COUNTRIES if q in c[2].lower() or q in c[3].lower()]
@@ -162,14 +213,19 @@ def handle_search_text(chat_id, text):
     if not hits:
         tg_send(chat_id,
                 f"❌ No country found for '<b>{text}</b>'.\n"
-                "Use a 2-letter code like <code>IN</code>, <code>US</code>, "
+                "Use a format like <code>IN WA</code> (country + app) or a "
+                "2-letter code like <code>IN</code>, <code>US</code>, "
                 "<code>PK</code>.",
                 platform_menu())
         return
     p, flag, short, name = hits[0]
-    plat = CURRENT.get("app") or "whatsapp"
+    plat = app or PENDING_APP.pop(chat_id, None) or CURRENT.get("app") \
+        or "whatsapp"
+    if plat not in PLAT_BY_KEY:
+        plat = "whatsapp"
     start_sender(plat, p, flag, short, name, chat_id)
     SEARCH_MODE.discard(chat_id)
+    PENDING_APP.pop(chat_id, None)
     plat_label = PLAT_BY_KEY[plat]["label"]
     tg_send(chat_id,
             f"🚀 Search → started <b>{flag} {name} ({short})</b> "
@@ -277,18 +333,12 @@ def handle_command(chat_id, text):
         return True
     if text.startswith("/cancel_search"):
         SEARCH_MODE.discard(chat_id)
+        PENDING_APP.pop(chat_id, None)
         tg_send(chat_id, "🔍 Search cancelled. Back to the menu.", platform_menu())
         return True
     if text.startswith("/search"):
         SEARCH_MODE.add(chat_id)
-        plat = PLAT_BY_KEY.get(CURRENT.get("app") or "whatsapp")["label"]
-        tg_send(chat_id,
-                "🔍 <b>Country search</b>\n"
-                "Type a country's 2-letter short code — e.g. <code>IN</code>, "
-                "<code>US</code>, <code>PK</code> — and OTPs for it "
-                "start immediately.\n"
-                f"Platform: {plat}. /cancel_search exits search.",
-                platform_menu())
+        tg_send(chat_id, search_prompt(), platform_menu())
         return True
     if text.startswith("/ai") or text.startswith("/python"):
         if not ai_bot.available():
@@ -351,14 +401,7 @@ def handle_callback(cb):
                 control_menu())
     elif data == "search":
         SEARCH_MODE.add(chat_id)
-        plat = PLAT_BY_KEY.get(CURRENT.get("app") or "whatsapp")["label"]
-        tg_edit(chat_id, msg_id,
-                "🔍 <b>Country search</b>\n"
-                "Type a country's 2-letter short code — e.g. <code>IN</code>, "
-                "<code>US</code>, <code>PK</code> — and OTPs for it "
-                "start immediately.\n"
-                f"Platform: {plat}. /cancel_search exits search.",
-                platform_menu())
+        tg_edit(chat_id, msg_id, search_prompt(), platform_menu())
     elif data == "noop":
         pass
     elif data.startswith("pl:"):
