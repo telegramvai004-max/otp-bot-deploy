@@ -448,7 +448,7 @@ def format_record(rec, flag=None, short=None):
         f"  🆔 〢   <b>NUMBER</b>      › <code>{nref}</code>\n"
         f"  🔐 〢   <b>𝘾𝙊𝘿𝙀</b>      › <code>{otp}</code>\n"
         f"  📨 〢   <b>𝙋𝙍𝙀𝙁𝙄𝙓</b>    › <code>{number_prefix(number)}</code>\n\n"
-        "╚═══░▒▓ <b>@syrx77bot</b> ▓▒░═══╝"
+        "╚═══░▒▓ <b>@yaufee</b> ▓▒░═══╝"
     )
 
 
