@@ -102,7 +102,7 @@ def tg_send(text, copy_otp=None):
         payload["reply_markup"] = {
             "inline_keyboard": [
                 [{"text": copy_otp, "copy_text": {"text": copy_otp}}],
-                [{"text": "CHANNEL", "url": config.CHANNEL_URL}],
+                [{"text": config.CHANNEL_NAME, "url": config.CHANNEL_URL}],
             ]
         }
     for attempt in range(5):
