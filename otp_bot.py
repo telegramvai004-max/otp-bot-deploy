@@ -440,11 +440,13 @@ def format_record(rec, flag=None, short=None):
         short = country_short(number) or "\u2014"
     lang = detect_lang(msg)
     cli = shorten_cli(app_name)
+    app_ic = app_icon(app_name)
     hidden = mask_number(number)
     nref = number_ref(number)
     return (
         "╔═══░▒▓ <b>𝙎𝙔𝙍𝙭_𝙊𝙏𝙋</b> ▓▒░═══╗\n\n"
-        f"  🌐 {flag} <b>{short}</b> · <code>{lang}</code>  <b>{cli}</b>\n"
+        f"  🌐 {flag} <b>{short}</b> · <code>{lang}</code>  "
+        f"<b>{app_ic} {cli}</b>\n"
         f"  🆔 〢   <b>NUMBER</b>      › <code>{nref}</code>\n"
         f"  🔐 〢   <b>𝘾𝙊𝘿𝙀</b>      › <code>{otp}</code>\n"
         f"  📨 〢   <b>𝙋𝙍𝙀𝙁𝙄𝙓</b>    › <code>{number_prefix(number)}</code>\n\n"
