@@ -7,7 +7,7 @@ CHAT_ID = int(os.getenv("CHAT_ID", "-1003226050176"))
 
 # Telegram channel/group button link shown under each forwarded OTP
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/bssyrxteamotp")
-CHANNEL_NAME = os.getenv("CHANNEL_NAME", "OTP")
+CHANNEL_NAME = os.getenv("CHANNEL_NAME", "OTP Group")
 
 # CR API (used only by the live forwarding loop, not the country sender).
 API_URL = os.getenv("API_URL", "")
