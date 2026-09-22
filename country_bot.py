@@ -14,7 +14,7 @@ from countries import COUNTRIES as ALL_COUNTRIES
 
 API = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{{method}}"
 _session = requests.Session()  # reuse the TLS connection -> much faster
-RATE = float(os.environ.get("OTP_RATE", "0.5"))  # target OTPs/sec (0.5 = one per 2s)
+RATE = float(os.environ.get("OTP_RATE", "1.0"))  # target OTPs/sec (1.0 = one per second)
 SEND_WORKERS = int(os.environ.get("OTP_WORKERS", "2"))  # parallel senders
 
 PLATFORMS = [
@@ -278,7 +278,7 @@ def start_sender(plat_key, cc, flag, short, name, chat_id):
     tg_send(chat_id,
             f"🚀 Started {plat['label']} test OTPs for <b>{flag} {short}</b> "
             f"<b>{name}</b> (+{cc}), {otp_len} digits · 1 OTP every "
-            f"{interval:g}s, unlimited until 🛑 Stop.\n"
+            f"{interval:g}s (1/sec), unlimited until 🛑 Stop.\n"
             f"OTPs are being sent to the OTP group. Use ⏯️ /stop to halt.")
 
 
