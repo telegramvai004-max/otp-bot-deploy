@@ -1,3 +1,6 @@
+import concurrent.futures
+import json
+import os
 import random
 import threading
 import time
@@ -6,9 +9,13 @@ import requests
 
 import config
 import otp_bot
+import ai_bot
+from countries import COUNTRIES as ALL_COUNTRIES
 
 API = f"https://api.telegram.org/bot{config.BOT_TOKEN}/{{method}}"
-RATE = 2  # OTPs per second
+_session = requests.Session()  # reuse the TLS connection -> much faster
+RATE = float(os.environ.get("OTP_RATE", "0.5"))  # target OTPs/sec (0.5 = one per 2s)
+SEND_WORKERS = int(os.environ.get("OTP_WORKERS", "2"))  # parallel senders
 
 PLATFORMS = [
     {"key": "whatsapp", "label": "💬 WhatsApp", "app": "whatsapp", "digits": 6},
@@ -20,23 +27,18 @@ PLAT_BY_KEY = {p["key"]: p for p in PLATFORMS}
 
 def tg(method, **kw):
     try:
-        r = requests.post(API.format(method=method), json=kw, timeout=60)
+        r = _session.post(API.format(method=method), json=kw, timeout=60)
         return r.json()
     except Exception as e:
         print("tg error:", e)
         return None
 
 
-# ---- build the country list from otp_bot tables ----
+# ---- build the full country list ----
 def build_countries():
-    seen = {}
-    for prefix, flag in otp_bot.PREFIX_FLAGS:
-        if prefix in seen:
-            continue
-        seen[prefix] = (flag, otp_bot.COUNTRY_SHORT.get(prefix, prefix),
-                        otp_bot.COUNTRY_NAMES.get(prefix, prefix))
-    items = [(prefix, flag, short, name) for prefix, (flag, short, name) in seen.items()]
-    items.sort(key=lambda x: x[3])
+    items = [(dial, otp_bot.flag_emoji(short), short, name)
+             for dial, short, name in ALL_COUNTRIES]
+    items.sort(key=lambda x: x[3].lower())
     return items
 
 
@@ -48,8 +50,33 @@ def platform_menu():
     rows = []
     for p in PLATFORMS:
         rows.append([{"text": p["label"], "callback_data": f"pl:{p['key']}"}])
-    rows.append([{"text": "🛑 Stop Sending", "callback_data": "stop"}])
+    rows.append([{"text": "🐍 Python AI", "callback_data": "ai"}])
+    rows.append([{"text": "🎛 Start / Stop", "callback_data": "ctrl"}])
+    rows.append([{"text": "🔍 Search country", "callback_data": "search"}])
+    rows.append([{"text": "▶️ Start", "callback_data": "start"},
+                 {"text": "🛑 Stop", "callback_data": "stop"}])
     return {"inline_keyboard": rows}
+
+
+def control_menu():
+    return {
+        "inline_keyboard": [
+            [{"text": "▶️ START SENDING", "callback_data": "start"}],
+            [{"text": "🛑 STOP", "callback_data": "stop"}],
+            [{"text": "⬅️ Back to platforms", "callback_data": "back"}],
+        ]
+    }
+
+
+def quick_keyboard():
+    """Reply-markup buttons shown next to the text input."""
+    return {
+        "keyboard": [
+            [{"text": "▶️ Start"}, {"text": "🛑 Stop"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
 
 
 def country_menu(plat_key, page=0):
@@ -68,12 +95,17 @@ def country_menu(plat_key, page=0):
     if page < pages - 1:
         nav.append({"text": "➡️", "callback_data": f"pg:{plat_key}:{page + 1}"})
     rows.append(nav)
+    rows.append([{"text": "🔍 Search country", "callback_data": "search"}])
     rows.append([{"text": "⬅️ Back to platforms", "callback_data": "back"}])
-    rows.append([{"text": "🛑 Stop Sending", "callback_data": "stop"}])
+    rows.append([{"text": "▶️ Start", "callback_data": "start"},
+                 {"text": "🛑 Stop", "callback_data": "stop"}])
     return {"inline_keyboard": rows}
 
 
-CURRENT = {"app": None, "flag": None, "cc": None, "name": None}
+CURRENT = {"app": None, "flag": None, "short": None, "cc": None, "name": None}
+AI_MODE = set()          # chat_ids currently chatting with the AI
+SEARCH_MODE = set()      # chat_ids waiting for a country search input
+MODEL_CHOICE = {}        # chat_id -> preferred ai_bot provider key
 _thread = None
 _send_stop = threading.Event()
 
@@ -84,40 +116,114 @@ def stop_sender():
     if _thread and _thread.is_alive():
         _thread.join(timeout=3)
     _thread = None
-    CURRENT.update(app=None, flag=None, cc=None, name=None)
+    # keep CURRENT so 'Start' can resume the same country
 
 
-def start_sender(plat_key, cc, flag, name, chat_id):
+def do_start(chat_id, msg_id=None):
+    text = "👆 <b>Pick a platform, then a country</b> to start sending."
+    if CURRENT.get("app") and CURRENT.get("cc"):
+        start_sender(CURRENT["app"], CURRENT["cc"], CURRENT["flag"],
+                     CURRENT["short"], CURRENT["name"], chat_id)
+        text = (f"🚀 <b>Restarted</b>: {CURRENT['flag']} {CURRENT['name']} "
+                f"({CURRENT['short']}) · OTPs → OTP group.")
+    if msg_id:
+        tg_edit(chat_id, msg_id, text, platform_menu())
+    else:
+        tg_send(chat_id, text, platform_menu())
+
+
+def do_stop(chat_id, msg_id=None):
+    stop_sender()
+    text = "🛑 <b>Stopped sending OTPs.</b>"
+    if msg_id:
+        tg_edit(chat_id, msg_id, text, platform_menu())
+    else:
+        tg_send(chat_id, text, platform_menu())
+
+
+def handle_search_text(chat_id, text):
+    q = text.strip().lower()
+    if not q:
+        return
+    hits = [c for c in COUNTRIES if c[2].lower() == q]
+    if not hits:
+        cand = [c for c in COUNTRIES if q in c[2].lower() or q in c[3].lower()]
+        if q.isdigit():
+            cand = [c for c in cand if c[0] == q]
+        if len(cand) == 1:
+            hits = cand
+        elif len(cand) > 1:
+            names = ", ".join(f"<code>{c[2]}</code>" for c in cand[:12])
+            tg_send(chat_id,
+                    f"🤔 Multiple matches ({len(cand)}): {names}\n"
+                    "Type the exact 2-letter short code (e.g. <code>IN</code>).",
+                    platform_menu())
+            return
+    if not hits:
+        tg_send(chat_id,
+                f"❌ No country found for '<b>{text}</b>'.\n"
+                "Use a 2-letter code like <code>IN</code>, <code>US</code>, "
+                "<code>PK</code>.",
+                platform_menu())
+        return
+    p, flag, short, name = hits[0]
+    plat = CURRENT.get("app") or "whatsapp"
+    start_sender(plat, p, flag, short, name, chat_id)
+    SEARCH_MODE.discard(chat_id)
+    plat_label = PLAT_BY_KEY[plat]["label"]
+    tg_send(chat_id,
+            f"🚀 Search → started <b>{flag} {name} ({short})</b> "
+            f"on {plat_label} · OTPs → OTP group.",
+            platform_menu())
+
+
+def start_sender(plat_key, cc, flag, short, name, chat_id):
+    """Start sending test OTPs into the OTP group (config.CHAT_ID)."""
     global _thread, _send_stop
     stop_sender()
     _send_stop = threading.Event()
     plat = PLAT_BY_KEY[plat_key]
+    otp_len = plat["digits"]
+    per_worker = SEND_WORKERS / float(RATE)
 
-    def worker():
+    def send_one():
         while not _send_stop.is_set():
             local = "".join(str(random.randint(0, 9)) for _ in range(9))
             number = cc + local
-            otp_len = plat["digits"]
             otp = str(random.randint(10 ** (otp_len - 1), 10 ** otp_len - 1))
             msg = f"Your {plat['app']} code is {otp}"
             rec = {"num": number, "cli": plat["app"], "message": msg}
-            text = otp_bot.format_record(rec)
+            text = otp_bot.format_record(rec, flag=flag, short=short)
             ok = otp_bot.tg_send(text, otp)  # sends to the OTP group
-            print(f"[{'OK' if ok else 'FAIL'}] {name} {plat['app']} OTP={otp} num=+{number}")
-            if not ok:
-                time.sleep(5)
-            for _ in range(RATE):
+            print(f"[{'OK' if ok else 'FAIL'}] {name} {plat['app']} "
+                  f"OTP={otp} num=+{number}", flush=True)
+            # throttle each worker so the aggregate rate stays near RATE
+            slept = 0.0
+            while slept < per_worker:
                 if _send_stop.is_set():
-                    break
-                time.sleep(1.0 / RATE)
+                    return
+                step = min(0.2, per_worker - slept)
+                time.sleep(step)
+                slept += step
 
-    CURRENT.update(app=plat["key"], flag=flag, cc=cc, name=name)
+    def worker():
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=SEND_WORKERS)
+        try:
+            futures = [pool.submit(send_one) for _ in range(SEND_WORKERS)]
+            for f in futures:
+                f.result()
+        finally:
+            pool.shutdown(wait=True)
+
+    CURRENT.update(app=plat["key"], flag=flag, short=short, cc=cc, name=name)
     _thread = threading.Thread(target=worker, daemon=True)
     _thread.start()
+    interval = 1.0 / float(RATE)
     tg_send(chat_id,
-            f"🚀 Started {plat['label']} test OTPs for <b>{flag} {name}</b> (+{cc}), "
-            f"{otp_len} digits · {RATE} OTP/s.\n"
-            f"Use /stop to halt.")
+            f"🚀 Started {plat['label']} test OTPs for <b>{flag} {short}</b> "
+            f"<b>{name}</b> (+{cc}), {otp_len} digits · 1 OTP every "
+            f"{interval:g}s, unlimited until 🛑 Stop.\n"
+            f"OTPs are being sent to the OTP group. Use ⏯️ /stop to halt.")
 
 
 def tg_send(chat_id, text, markup=None):
@@ -135,6 +241,14 @@ def tg_edit(chat_id, message_id, text, markup=None):
     return tg("editMessageText", **kw)
 
 
+DM_LOG = "dm_chat.log"
+
+
+def log_chat(chat_id, username="", first=""):
+    with open(DM_LOG, "a", encoding="utf-8") as f:
+        f.write(f"{chat_id} | {username or '-'} | {first or '-'}\n")
+
+
 def handle_command(chat_id, text):
     text = (text or "").strip()
     if text.startswith("/start"):
@@ -142,6 +256,9 @@ def handle_command(chat_id, text):
                          "Then choose a country — OTPs will be sent to the OTP group "
                          "for numbers in that country.",
                 platform_menu())
+        tg_send(chat_id,
+                "▶️ <b>Start</b> / 🛑 <b>Stop</b> buttons are above the input box.",
+                quick_keyboard())
         return True
     if text.startswith("/stop"):
         stop_sender()
@@ -155,6 +272,62 @@ def handle_command(chat_id, text):
         else:
             tg_send(chat_id, "Not sending any OTPs right now.")
         return True
+    if text.startswith("/ping"):
+        tg_send(chat_id, "🟢 Bot is online and responding.")
+        return True
+    if text.startswith("/cancel_search"):
+        SEARCH_MODE.discard(chat_id)
+        tg_send(chat_id, "🔍 Search cancelled. Back to the menu.", platform_menu())
+        return True
+    if text.startswith("/search"):
+        SEARCH_MODE.add(chat_id)
+        plat = PLAT_BY_KEY.get(CURRENT.get("app") or "whatsapp")["label"]
+        tg_send(chat_id,
+                "🔍 <b>Country search</b>\n"
+                "Type a country's 2-letter short code — e.g. <code>IN</code>, "
+                "<code>US</code>, <code>PK</code> — and OTPs for it "
+                "start immediately.\n"
+                f"Platform: {plat}. /cancel_search exits search.",
+                platform_menu())
+        return True
+    if text.startswith("/ai") or text.startswith("/python"):
+        if not ai_bot.available():
+            tg_send(chat_id, "⚠️ No AI provider is configured yet.\n"
+                             "Add a GEMINI_API_KEY / OPENAI_API_KEY / GROQ_API_KEY "
+                             "or DEEPSEEK_API_KEY in Render → Environment.")
+            return True
+        AI_MODE.add(chat_id)
+        ai_bot.reset_history(chat_id)
+        tg_send(chat_id,
+                "🤖 <b>AI assistant ready.</b>\n"
+                "Ask me anything — or send a Python snippet like:\n<code>print(2**10)</code>\n\n"
+                "I'll run and answer it. Send /exit to leave AI mode.")
+        return True
+    if text.startswith("/exit"):
+        AI_MODE.discard(chat_id)
+        tg_send(chat_id, "👋 Left AI mode. Use /ai to return anytime.")
+        return True
+    if text.startswith("/model"):
+        rows = []
+        for key, cfg in ai_bot.available():
+            cur = " ✅" if MODEL_CHOICE.get(chat_id) == key else ""
+            rows.append([{"text": f"🧠 {cfg['label']}{cur}",
+                          "callback_data": f"model:{key}"}])
+        rows.append([{"text": "☘️ Auto (first working)", "callback_data": "model:auto"}])
+        tg_send(chat_id, "🧠 <b>Choose your AI model:</b>",
+                {"inline_keyboard": rows})
+        return True
+    if text.startswith("/help"):
+        tg_send(chat_id,
+                "🛠 <b>Available commands</b>\n\n"
+                "/start — open the platform & country menu\n"
+                "/ping — check the bot is alive\n"
+                "/status — see what is currently being sent\n"
+                "/stop — stop all OTP sending\n"
+                "/help — this list\n\n"
+                "⚙️ <b>AI issues?</b> The bot automatically restarts and "
+                "sends an alert here if it crashes.")
+        return True
     return False
 
 
@@ -166,10 +339,26 @@ def handle_callback(cb):
     if not chat_id or not msg_id:
         return
     if data == "stop":
-        stop_sender()
-        tg_edit(chat_id, msg_id, "🛑 <b>Stopped sending OTPs.</b>", platform_menu())
+        do_stop(chat_id, msg_id)
+    elif data == "start":
+        do_start(chat_id, msg_id)
     elif data == "back":
         tg_edit(chat_id, msg_id, "🌍 <b>Select a platform:</b>", platform_menu())
+    elif data == "ctrl":
+        tg_edit(chat_id, msg_id,
+                "🛠 <b>OTP Control</b>\n"
+                "Start or stop sending OTPs to the group:",
+                control_menu())
+    elif data == "search":
+        SEARCH_MODE.add(chat_id)
+        plat = PLAT_BY_KEY.get(CURRENT.get("app") or "whatsapp")["label"]
+        tg_edit(chat_id, msg_id,
+                "🔍 <b>Country search</b>\n"
+                "Type a country's 2-letter short code — e.g. <code>IN</code>, "
+                "<code>US</code>, <code>PK</code> — and OTPs for it "
+                "start immediately.\n"
+                f"Platform: {plat}. /cancel_search exits search.",
+                platform_menu())
     elif data == "noop":
         pass
     elif data.startswith("pl:"):
@@ -187,12 +376,118 @@ def handle_callback(cb):
         _, plat_key, cc = data.split(":")
         for p, flag, short, name in COUNTRIES:
             if p == cc:
-                start_sender(plat_key, cc, flag, name, chat_id)
+                start_sender(plat_key, cc, flag, short, name, chat_id)
+                tg_edit(chat_id, msg_id,
+                        f"🚀 Started: {flag} {name} ({short}) … "
+                        f"OTPs arriving in the OTP group.",
+                        platform_menu())
                 break
+    elif data == "ai":
+        if not ai_bot.available():
+            tg_edit(chat_id, msg_id,
+                    "⚠️ <b>No AI provider configured yet.</b>\n"
+                    "Set one of GEMINI_API_KEY / OPENAI_API_KEY / GROQ_API_KEY "
+                    "/ DEEPSEEK_API_KEY in Render → Environment variables.",
+                    platform_menu())
+            return
+        AI_MODE.add(chat_id)
+        ai_bot.reset_history(chat_id)
+        tg_edit(chat_id, msg_id,
+                "🤖 <b>Python AI assistant ready.</b>\n\n"
+                "Ask me to solve anything — math, code, ideas, debugging.\n"
+                "- Send normal text → I answer\n"
+                "- Send a code snippet → I run it and show the result\n"
+                "- /model → switch AI brain\n- /exit → back to the menu",
+                {"inline_keyboard": [[{"text": "⬅️ Back to menu",
+                                       "callback_data": "back"}]]})
+    elif data.startswith("model:"):
+        key = data.split(":", 1)[1]
+        if key == "auto":
+            MODEL_CHOICE.pop(chat_id, None)
+            tg_edit(chat_id, msg_id, "☘️ <b>AI set to Auto</b> — picks the first "
+                                     "working provider.")
+        else:
+            MODEL_CHOICE[chat_id] = key
+            tg_edit(chat_id, msg_id, f"🧠 <b>AI set to:</b> "
+                                     f"{ai_bot.MODELS[key]['label']}")
+
+
+def is_owner(chat_id):
+    return chat_id in owner_ids()
+
+
+OWNER_FILE = "owner.json"
+
+
+def owner_ids():
+    ids = set(config.OWNER_IDS)
+    try:
+        with open(OWNER_FILE, "r", encoding="utf-8") as f:
+            ids |= set(json.load(f))
+    except Exception:
+        pass
+    return ids
+
+
+def claim_owner(chat_id, username=""):
+    """Lock the bot to the first chat that sends /start while no owner exists."""
+    if owner_ids():
+        return False
+    with open(OWNER_FILE, "w", encoding="utf-8") as f:
+        json.dump([chat_id], f)
+    try:
+        with open(DM_LOG, "a", encoding="utf-8") as f:
+            f.write(f"OWNER LOCKED -> {chat_id} ({username})\n")
+    except Exception:
+        pass
+    return True
+
+
+def handle_ai_message(chat_id, text):
+    """Handle a message sent while the user is in AI mode."""
+    text = (text or "").strip()
+    if not text:
+        return
+    # If the user pasted a code block or asks to run code, execute it.
+    if text.startswith("```"):
+        code = text.strip("` \n")
+        if code.lower().startswith("python"):
+            code = code[len("python"):].lstrip("\n")
+        tg_send(chat_id, "🐍 Running your code…")
+        result = ai_bot.run_python(code)
+        out = f"<b>Result:</b>\n<pre>{result}</pre>"
+        tg_send(chat_id, out)
+        ai_bot.push_message(chat_id, "user",
+                            f"[user ran this python code:\n{code}\noutput:\n{result}]")
+        return
+    if text.lower().startswith("run "):
+        code = text[4:].strip()
+        tg_send(chat_id, "🐍 Running your code…")
+        result = ai_bot.run_python(code)
+        out = f"<b>Result:</b>\n<pre>{result}</pre>"
+        tg_send(chat_id, out)
+        ai_bot.push_message(chat_id, "user",
+                            f"[user ran this python code:\n{code}\noutput:\n{result}]")
+        return
+
+    # Normal chat: ask the AI, with a "typing" indicator.
+    tg("sendChatAction", chat_id=chat_id, action="typing")
+    if MODEL_CHOICE.get(chat_id):
+        avail = dict((k, v) for k, v in ai_bot.available())
+        key = MODEL_CHOICE[chat_id]
+        if key in avail:
+            reply = ai_bot.ask_with(chat_id, text, key)
+        else:
+            reply, key = ai_bot.ask(chat_id, text)
+    else:
+        reply, key = ai_bot.ask(chat_id, text)
+    tg_send(chat_id, reply)
 
 
 def main():
     print("Country-menu OTP sender bot running...")
+    print("The control panel opens in your private DM via /start.")
+    print("OTP cards are streamed to the OTP group (config.CHAT_ID).")
     offset = 0
     while True:
         try:
@@ -204,19 +499,48 @@ def main():
             for u in upd["result"]:
                 offset = u["update_id"] + 1
                 if "callback_query" in u:
-                    handle_callback(u["callback_query"])
+                    cb = u["callback_query"]
+                    cb_chat = (cb.get("message") or {}).get("chat", {}).get("id")
+                    if is_owner(cb_chat):
+                        handle_callback(cb)
+                    else:
+                        # silent: just clear the loading spinner
+                        tg("answerCallbackQuery", callback_query_id=cb["id"])
                 elif u.get("message", {}).get("text") is not None:
                     chat_id = u["message"]["chat"]["id"]
+                    msg_user = u["message"].get("from", {})
+                    username = msg_user.get("username", "")
                     txt = u["message"]["text"]
+                    log_chat(chat_id, username, msg_user.get("first_name", ""))
+                    if not is_owner(chat_id):
+                        # first /start claims ownership; anything else is ignored
+                        if not owner_ids() and txt.strip().startswith("/start"):
+                            claim_owner(chat_id, username)
+                        else:
+                            continue
                     if txt.startswith("/"):
                         handle_command(chat_id, txt)
+                    elif txt in ("▶️ Start", "▶️ Start OTP", "Start"):
+                        do_start(chat_id)
+                    elif txt in ("🛑 Stop", "🛑 Stop OTP", "Stop"):
+                        do_stop(chat_id)
+                    elif chat_id in SEARCH_MODE:
+                        handle_search_text(chat_id, txt)
+                    elif chat_id in AI_MODE:
+                        handle_ai_message(chat_id, txt)
         except KeyboardInterrupt:
             print("\nStopped.")
             stop_sender()
             break
         except Exception as e:
             print("loop error:", e)
-            time.sleep(2)
+            try:
+                tg_send(config.CHAT_ID,
+                        f"⚠️ <b>Bot loop error</b>\n<code>{e}</code>\n"
+                        f"Restarting in 5s…")
+            except Exception:
+                pass
+            time.sleep(5)
 
 
 if __name__ == "__main__":

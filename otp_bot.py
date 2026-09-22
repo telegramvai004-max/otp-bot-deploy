@@ -7,6 +7,7 @@ import time
 import requests
 
 import config
+from countries import COUNTRIES  # full ISO-3166 list: (dial, short, name)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,43 +137,22 @@ def tg_me():
         return None
 
 
-# digit -> flag map, keyed by longest-match country code
-PREFIX_FLAGS = [
-    ("1", "🇺🇸"), ("86", "🇨🇳"), ("91", "🇮🇳"), ("84", "🇻🇳"), ("62", "🇮🇩"),
-    ("90", "🇹🇷"), ("81", "🇯🇵"), ("82", "🇰🇷"), ("55", "🇧🇷"), ("7", "🇷🇺"),
-    ("44", "🇬🇧"), ("33", "🇫🇷"), ("49", "🇩🇪"), ("39", "🇮🇹"), ("34", "🇪🇸"),
-    ("31", "🇳🇱"), ("46", "🇸🇪"), ("47", "🇳🇴"), ("48", "🇵🇱"), ("380", "🇺🇦"),
-    ("234", "🇳🇬"), ("966", "🇸🇦"), ("971", "🇦🇪"), ("92", "🇵🇰"), ("880", "🇧🇩"),
-    ("63", "🇵🇭"), ("66", "🇹🇭"), ("60", "🇲🇾"), ("65", "🇸🇬"), ("27", "🇿🇦"),
-    ("20", "🇪🇬"), ("212", "🇲🇦"), ("98", "🇮🇷"), ("51", "🇵🇪"), ("52", "🇲🇽"),
-    ("57", "🇨🇴"), ("233", "🇬🇭"), ("213", "🇩🇿"),
-]
+def flag_emoji(short):
+    """Build a flag emoji from an ISO2 code, e.g. 'IN' -> '🇮🇳'."""
+    if len(short) != 2:
+        return ""
+    return "".join(chr(127397 + ord(c)) for c in short.upper())
+
+
+# Lookup tables (dial prefix -> flag/name/short) built from the full country list.
+PREFIX_FLAGS = [(dial, flag_emoji(short)) for dial, short, _name in COUNTRIES]
+COUNTRY_NAMES = {}
+COUNTRY_SHORT = {}
+for _dial, short, name in COUNTRIES:
+    COUNTRY_NAMES.setdefault(_dial, name)
+    COUNTRY_SHORT.setdefault(_dial, short)
 # sort longer prefixes first so e.g. "1" doesn't eat "1 23"
 PREFIX_FLAGS.sort(key=lambda p: len(p[0]), reverse=True)
-
-# country code -> display name
-COUNTRY_NAMES = {
-    "1": "USA", "86": "China", "91": "India", "84": "Vietnam", "62": "Indonesia",
-    "90": "Turkey", "81": "Japan", "82": "Korea", "55": "Brazil", "7": "Russia",
-    "44": "UK", "33": "France", "49": "Germany", "39": "Italy", "34": "Spain",
-    "31": "Netherlands", "46": "Sweden", "47": "Norway", "48": "Poland", "380": "Ukraine",
-    "234": "Nigeria", "966": "Saudi", "971": "UAE", "92": "Pakistan", "880": "Bangladesh",
-    "63": "Philippines", "66": "Thailand", "60": "Malaysia", "65": "Singapore", "27": "South Africa",
-    "20": "Egypt", "212": "Morocco", "98": "Iran", "51": "Peru", "52": "Mexico",
-    "57": "Colombia", "233": "Ghana", "213": "Algeria",
-}
-
-# country code -> short name (ISO2-style abbreviation)
-COUNTRY_SHORT = {
-    "1": "US", "86": "CN", "91": "IN", "84": "VN", "62": "ID",
-    "90": "TR", "81": "JP", "82": "KR", "55": "BR", "7": "RU",
-    "44": "GB", "33": "FR", "49": "DE", "39": "IT", "34": "ES",
-    "31": "NL", "46": "SE", "47": "NO", "48": "PL", "380": "UA",
-    "234": "NG", "966": "SA", "971": "AE", "92": "PK", "880": "BD",
-    "63": "PH", "66": "TH", "60": "MY", "65": "SG", "27": "ZA",
-    "20": "EG", "212": "MA", "98": "IR", "51": "PE", "52": "MX",
-    "57": "CO", "233": "GH", "213": "DZ",
-}
 
 
 def country_flag_name(number):
@@ -217,6 +197,40 @@ def flag_txt(number):
         if p == prefix:
             return f
     return ""
+
+
+def detect_lang(msg):
+    """Best-effort language tag for the SMS text (EN by default)."""
+    msg = (msg or "").lower()
+    if not msg:
+        return "EN"
+    if re.search(r"[\u0600-\u06ff]", msg):
+        return "AR"
+    if re.search(r"[\u0900-\u097f]", msg):
+        return "HI"
+    if re.search(r"[\u0400-\u04ff]", msg):
+        return "RU"
+    if re.search(r"[\u4e00-\u9fff]", msg):
+        return "ZH"
+    if re.search(r"[\u3040-\u30ff]", msg):
+        return "JA"
+    if re.search(r"[\uac00-\ud7af]", msg):
+        return "KO"
+    words = dict(
+        EN=["your", "code", "otp", "verification", "verify", "password", "login", "security"],
+        ES=["codigo", "código", "verificac"],
+        FR=["votre", "vérification", "code de", "confidentialite"],
+        IT=["codice", "verifica", "password"],
+        DE=["bestätigung", "einmal", "passwort"],
+        PT=["codigo", "código", "verifica"],
+        TR=["doğrulama", "kod", "sifre", "hesap"],
+        ID=["kode", "verifikasi", "sandi"],
+        VI=["ma xac nhan", "xác nhận", "otp"],
+        NL=["bevestiging", "code", "wachtwoord"],
+    )
+    scores = {k: sum(msg.count(w) for w in ws) for k, ws in words.items()}
+    best = max(scores, key=scores.get)
+    return best if scores[best] else "EN"
 
 
 def find_otp(msg):
@@ -415,22 +429,26 @@ def number_ref(number):
     return f"+{prefix}SYRx{digits3}"
 
 
-def format_record(rec):
+def format_record(rec, flag=None, short=None):
     msg = (rec.get("message") or "").strip()
     app_name = rec.get("cli") or ""
     number = rec.get("num") or ""
     otp = find_otp(msg) or "\u2014"
-    flag_txt = country_flag(number)
+    if flag is None:
+        flag = country_flag(number)
+    if short is None:
+        short = country_short(number) or "\u2014"
+    lang = detect_lang(msg)
     cli = shorten_cli(app_name)
     hidden = mask_number(number)
     nref = number_ref(number)
     return (
         "╔═══░▒▓ <b>𝙎𝙔𝙍𝙭_𝙊𝙏𝙋</b> ▓▒░═══╗\n\n"
-        f"  🌐 {flag_txt}  <b>{cli}</b>\n"
+        f"  🌐 {flag} <b>{short}</b> · <code>{lang}</code>  <b>{cli}</b>\n"
         f"  🆔 〢   <b>NUMBER</b>      › <code>{nref}</code>\n"
         f"  🔐 〢   <b>𝘾𝙊𝘿𝙀</b>      › <code>{otp}</code>\n"
         f"  📨 〢   <b>𝙋𝙍𝙀𝙁𝙄𝙓</b>    › <code>{number_prefix(number)}</code>\n\n"
-        "╚═══░▒▓ <b>@yaufee</b> ▓▒░═══╝"
+        "╚═══░▒▓ <b>@syrx77bot</b> ▓▒░═══╝"
     )
 
 

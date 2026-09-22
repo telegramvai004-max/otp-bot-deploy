@@ -1,14 +1,17 @@
 import os
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8403980211:AAEe7sRuzrb_HlvS0DK-NOtI6KJ0nRGdBcM")
-CHAT_ID = int(os.getenv("CHAT_ID", -1003226050176))
+# Secrets come from environment variables, with repository fallbacks so the
+# bot boots without extra setup on Render.
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8900663004:AAFmgdQeTop6ValsE6er-ZgxEu0n59_MNvU")
+CHAT_ID = int(os.getenv("CHAT_ID", "-1003226050176"))
 
 # Telegram channel/group button link shown under each forwarded OTP
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/ys_personalgroup")
 CHANNEL_NAME = os.getenv("CHANNEL_NAME", "ys_personalgroup")
 
-API_URL = os.getenv("API_URL", "http://147.135.212.197/crapi/had/viewstats")
-API_TOKEN = os.getenv("API_TOKEN", "R1dXQjRSQnZXcohDiYFmgImOh0JBbVVVgpRRelWVZX9gk1BjeoSM")
+# CR API (used only by the live forwarding loop, not the country sender).
+API_URL = os.getenv("API_URL", "")
+API_TOKEN = os.getenv("API_TOKEN", "")
 
 # How many records to fetch from the API on each poll (max 200)
 RECORDS = 100
@@ -18,3 +21,8 @@ POLL_INTERVAL = 30
 
 # File used to remember which OTPs were already forwarded (so we don't re-send on restart)
 STATE_FILE = "state.json"
+
+# Telegram user IDs allowed to control the bot (comma-separated). Empty = open.
+OWNER_IDS = set(
+    int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()
+)

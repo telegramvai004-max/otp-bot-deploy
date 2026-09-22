@@ -2,3 +2,8 @@ state.json
 __pycache__/
 *.pyc
 deps.txt
+panel.log
+panel.err
+dm_chat.log
+send_test_sms.py
+owner.json.tmp
