@@ -23,6 +23,7 @@ PLATFORMS = [
     {"key": "telegram", "label": "✈️ Telegram", "app": "telegram", "digits": 5},
     {"key": "instagram", "label": "📸 Instagram", "app": "instagram", "digits": 6},
     {"key": "imo", "label": "💙 IMO", "app": "imo", "digits": 4},
+    {"key": "chatgpt", "label": "🤖 ChatGPT", "app": "chatgpt", "digits": 6},
 ]
 PLAT_BY_KEY = {p["key"]: p for p in PLATFORMS}
 
@@ -33,6 +34,7 @@ APP_ALIASES = {
     "tg": "telegram", "telegram": "telegram", "tel": "telegram",
     "ig": "instagram", "insta": "instagram", "instagram": "instagram",
     "imo": "imo", "im": "imo",
+    "chatgpt": "chatgpt", "gpt": "chatgpt",
 }
 
 
@@ -78,11 +80,12 @@ PER_PAGE = 8
 def platform_menu():
     rows = []
     for p in PLATFORMS:
-        if p["key"] in ("instagram", "imo"):
+        if p["key"] in ("instagram", "imo", "chatgpt"):
             continue  # these have their own one-click buttons below
         rows.append([{"text": p["label"], "callback_data": f"pl:{p['key']}"}])
     rows.append([{"text": "📸 Instagram OTP", "callback_data": "insta"}])
     rows.append([{"text": "💙 IMO OTP", "callback_data": "imo"}])
+    rows.append([{"text": "🤖 ChatGPT OTP", "callback_data": "chatgpt"}])
     rows.append([{"text": "🐍 Python AI", "callback_data": "ai"}])
     rows.append([{"text": "🎛 Start / Stop", "callback_data": "ctrl"}])
     rows.append([{"text": "🔍 Search country", "callback_data": "search"}])
@@ -185,7 +188,7 @@ def search_prompt():
             "<code>US TG</code> → USA · Telegram\n\n"
             "· Apps: 💬 <b>WA</b> WhatsApp · 📘 <b>FB</b> Facebook · "
             "✈️ <b>TG</b> Telegram · 📸 <b>IG</b> Instagram · "
-            "💙 <b>IMO</b>\n"
+            "💙 <b>IMO</b> · 🤖 <b>GPT</b>\n"
             "· Countries: 2-letter code like <code>IN</code>, "
             "<code>US</code>, <code>PK</code>\n"
             f"· No app given → uses: {side}\n"
@@ -439,6 +442,20 @@ def handle_callback(cb):
                     "💙 <b>Pick a country for IMO OTP</b> "
                     "(4-digit codes):",
                     country_menu("imo", 0))
+    elif data == "chatgpt":
+        if CURRENT.get("cc") and CURRENT.get("short"):
+            start_sender("chatgpt", CURRENT["cc"], CURRENT["flag"],
+                         CURRENT["short"], CURRENT["name"], chat_id)
+            tg_edit(chat_id, msg_id,
+                    f"🚀 <b>ChatGPT OTPs started</b> for "
+                    f"{CURRENT['flag']} {CURRENT['name']} "
+                    f"({CURRENT['short']}) — 6-digit codes → OTP group.",
+                    platform_menu())
+        else:
+            tg_edit(chat_id, msg_id,
+                    "🤖 <b>Pick a country for ChatGPT OTP</b> "
+                    "(6-digit codes):",
+                    country_menu("chatgpt", 0))
     elif data == "noop":
         pass
     elif data.startswith("pl:"):
