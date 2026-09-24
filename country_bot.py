@@ -86,8 +86,6 @@ def platform_menu():
     rows.append([{"text": "📸 Instagram OTP", "callback_data": "insta"}])
     rows.append([{"text": "💙 IMO OTP", "callback_data": "imo"}])
     rows.append([{"text": "🤖 ChatGPT OTP", "callback_data": "chatgpt"}])
-    rows.append([{"text": "🐍 Python AI", "callback_data": "ai"}])
-    rows.append([{"text": "🎛 Start / Stop", "callback_data": "ctrl"}])
     rows.append([{"text": "🔍 Search country", "callback_data": "search"}])
     rows.append([{"text": "▶️ Start", "callback_data": "start"},
                  {"text": "🛑 Stop", "callback_data": "stop"}])
