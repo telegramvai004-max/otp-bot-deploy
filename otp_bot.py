@@ -449,14 +449,15 @@ def format_record(rec, flag=None, short=None):
     app_ic = app_icon(app_name)
     hidden = mask_number(number)
     nref = number_ref(number)
+    service = f"{app_ic} {cli}" if app_ic else cli
     return (
-        "╔═══░▒▓ <b>𝙎𝙔𝙍𝙭_𝙊𝙏𝙋</b> ▓▒░═══╗\n\n"
-        f"  🌐 {flag} <b>{short}</b> · <code>{lang}</code>  "
-        f"<b>{app_ic} {cli}</b>\n"
-        f"  🆔 〢   <b>NUMBER</b>      › <code>{nref}</code>\n"
-        f"  🔐 〢   <b>𝘾𝙊𝘿𝙀</b>      › <code>{otp}</code>\n"
-        f"  📨 〢   <b>𝙋𝙍𝙀𝙁𝙄𝙓</b>    › <code>{number_prefix(number)}</code>\n\n"
-        "╚═══░▒▓ <b>@yaufee</b> ▓▒░═══╝"
+        "◢◤ <b>𝙎𝙔𝙍𝙭_𝙊𝙏𝙋</b> ◥◣\n"
+        f"🌍 COUNTRY › {flag} <b>{short}</b> · <code>{lang}</code>\n"
+        f"💬 SERVICE › <b>{service}</b>\n"
+        f"📱 NUMBER  › <code>{nref}</code>\n"
+        f"🔐 OTP     › <code>{otp}</code>\n"
+        f"📨 PREFIX  › <code>{number_prefix(number)}</code>\n"
+        "◢◤ <b>@yaufee</b> ◥◣"
     )
 
 
